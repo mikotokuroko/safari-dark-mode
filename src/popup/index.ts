@@ -37,6 +37,10 @@ function render(): void {
     input.value = String(settings[name]);
     output.value = String(settings[name]);
   }
+  const siteFieldset = document.querySelector<HTMLFieldSetElement>('fieldset');
+  if (siteFieldset !== null) {
+    siteFieldset.disabled = hostname === '';
+  }
   const mode = settings.siteModes[hostname] ?? 'auto';
   const radio = document.querySelector<HTMLInputElement>(`input[name="site-mode"][value="${mode}"]`);
   if (radio !== null) {

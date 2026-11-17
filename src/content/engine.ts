@@ -29,7 +29,8 @@ setFetchMethod(proxiedFetch);
 let activeTheme = '';
 
 export function enableEngine(settings: SettingsV1, url: string): void {
-  const key = JSON.stringify([settings.brightness, settings.contrast, settings.sepia, url]);
+  const hostname = new URL(url).hostname.toLowerCase();
+  const key = JSON.stringify([settings.brightness, settings.contrast, settings.sepia, hostname]);
   if (activeTheme === key) {
     return;
   }

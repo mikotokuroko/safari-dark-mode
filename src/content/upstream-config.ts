@@ -17,7 +17,7 @@ export interface DynamicThemeFix {
 }
 
 function parseBlocks(text: string): readonly ConfigBlock[] {
-  return text.split(/\n={16,}\n/g).map((section) => {
+  return text.replace(/\r\n/g, '\n').split(/\n={16,}\n/g).map((section) => {
     const lines = section.trim().split('\n');
     const patterns: string[] = [];
     let index = 0;
@@ -62,9 +62,12 @@ function patternMatches(hostname: string, pattern: string): boolean {
   return hostname === clean;
 }
 
-function relevantBlocks(text: string, url: string): readonly ConfigBlock[] {
+const parsedDetectorHints = parseBlocks(detectorHintsText);
+const parsedDynamicFixes = parseBlocks(dynamicFixesText);
+
+function relevantBlocks(blocks: readonly ConfigBlock[], url: string): readonly ConfigBlock[] {
   const hostname = new URL(url).hostname.toLowerCase();
-  return parseBlocks(text).filter((block) => block.patterns.some((pattern) => patternMatches(hostname, pattern)));
+  return blocks.filter((block) => block.patterns.some((pattern) => patternMatches(hostname, pattern)));
 }
 
 function lines(value: string | undefined): string[] {
@@ -72,7 +75,7 @@ function lines(value: string | undefined): string[] {
 }
 
 export function getDetectorHint(url: string): DetectorHint | undefined {
-  const block = relevantBlocks(detectorHintsText, url).find((candidate) => !candidate.patterns.includes('*'));
+  const block = relevantBlocks(parsedDetectorHints, url).find((candidate) => !candidate.patterns.includes('*'));
   if (block === undefined) {
     return undefined;
   }
@@ -85,7 +88,7 @@ export function getDetectorHint(url: string): DetectorHint | undefined {
 }
 
 export function getDynamicThemeFix(url: string): DynamicThemeFix {
-  const blocks = relevantBlocks(dynamicFixesText, url);
+  const blocks = relevantBlocks(parsedDynamicFixes, url);
   return {
     invert: blocks.flatMap((block) => lines(block.commands.INVERT)),
     css: blocks.map((block) => block.commands.CSS ?? '').filter(Boolean).join('\n'),
