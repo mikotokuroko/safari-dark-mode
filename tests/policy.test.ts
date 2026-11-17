@@ -4,23 +4,27 @@ import {validateSettings} from '../src/shared/settings';
 
 describe('fixed policy precedence', () => {
   const cases = [
-    [{enabled: false, siteModes: {'example.com': 'force'}}, true, false, 'disabled'],
-    [{enabled: true, siteModes: {'example.com': 'off'}}, false, false, 'disabled'],
-    [{enabled: true, siteModes: {'example.com': 'force'}}, true, true, 'forced'],
-    [{enabled: true, siteModes: {'example.com': 'auto'}}, true, false, 'native-dark'],
-    [{enabled: true}, false, true, 'forced'],
-    [{enabled: true}, true, true, 'forced'],
+    [{enabled: false, siteModes: {'example.com': 'force'}}, true, true, false, 'disabled'],
+    [{enabled: true, siteModes: {'example.com': 'off'}}, false, true, false, 'disabled'],
+    [{enabled: true, siteModes: {'example.com': 'force'}}, true, false, true, 'forced'],
+    [{enabled: true, siteModes: {'example.com': 'force'}}, false, false, true, 'forced'],
+    [{enabled: true, siteModes: {'example.com': 'auto'}}, true, true, false, 'native-dark'],
+    [{enabled: true, siteModes: {'example.com': 'auto'}}, false, true, true, 'darkened'],
+    [{enabled: true, siteModes: {'example.com': 'auto'}}, false, false, false, 'system-light'],
+    [{enabled: true}, false, true, true, 'darkened'],
+    [{enabled: true}, true, true, false, 'native-dark'],
+    [{enabled: true}, false, false, false, 'system-light'],
   ] as const;
 
-  for (const [partial, detected, apply, status] of cases) {
-    it(`${JSON.stringify(partial)} + native=${String(detected)} -> ${status}`, () => {
-      expect(decidePolicy(validateSettings(partial), 'example.com', detected)).toEqual({apply, status});
+  for (const [partial, detected, systemDark, apply, status] of cases) {
+    it(`${JSON.stringify(partial)} + native=${String(detected)} + systemDark=${String(systemDark)} -> ${status}`, () => {
+      expect(decidePolicy(validateSettings(partial), 'example.com', detected, systemDark)).toEqual({apply, status});
     });
   }
 
   it('isolates parent and subdomain rules', () => {
     const settings = validateSettings({siteModes: {'example.com': 'off'}});
-    expect(decidePolicy(settings, 'example.com', false).apply).toBe(false);
-    expect(decidePolicy(settings, 'www.example.com', false).apply).toBe(true);
+    expect(decidePolicy(settings, 'example.com', false, true).apply).toBe(false);
+    expect(decidePolicy(settings, 'www.example.com', false, true).apply).toBe(true);
   });
 });

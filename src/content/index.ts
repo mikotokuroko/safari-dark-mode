@@ -32,24 +32,37 @@ function report(state: PageState): void {
   }
 }
 
-function reevaluate(): void {
+function getDarkColorSchemeQuery(): MediaQueryList | undefined {
+  return typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : undefined;
+}
+
+function isSystemDark(): boolean {
+  return getDarkColorSchemeQuery()?.matches ?? true;
+}
+
+function reevaluate(): PageState {
   const hostname = location.hostname.toLowerCase();
   if (!/^https?:$/.test(location.protocol)) {
     disableEngine();
     removePreload();
-    report({hostname, status: 'unsupported'});
-    return;
+    const state: PageState = {hostname, status: 'unsupported'};
+    report(state);
+    return state;
   }
-  const nativeDark = settings.enabled && settings.siteModes[hostname] === 'auto'
+  const mode = settings.siteModes[hostname] ?? 'auto';
+  const systemDark = isSystemDark();
+  const nativeDark = settings.enabled && mode === 'auto' && systemDark
     && document.querySelector('body') !== null && detectNativeDark(document, getDetectorHint(location.href));
-  const decision = decidePolicy(settings, hostname, nativeDark);
+  const decision = decidePolicy(settings, hostname, nativeDark, systemDark);
   if (decision.apply) {
     enableEngine(settings, location.href);
   } else {
     disableEngine();
   }
   removePreload();
-  report({hostname, status: decision.status});
+  const state: PageState = {hostname, status: decision.status};
+  report(state);
+  return state;
 }
 
 const debouncedReevaluation = createDebouncedTask(reevaluate, 180);
@@ -58,9 +71,9 @@ function watchChanges(): void {
   themeObserver?.disconnect();
   themeObserver = observeThemeChanges(document, debouncedReevaluation.schedule);
   for (const method of ['pushState', 'replaceState'] as const) {
-    const original = history[method];
+    const original: (...args: Parameters<History[typeof method]>) => void = history[method].bind(history);
     history[method] = function (...args: Parameters<History[typeof method]>): void {
-      original.apply(history, args);
+      original(...args);
       debouncedReevaluation.schedule();
     } as History[typeof method];
   }
@@ -68,6 +81,7 @@ function watchChanges(): void {
   document.addEventListener('DOMContentLoaded', debouncedReevaluation.schedule, {once: true});
   addEventListener('popstate', debouncedReevaluation.schedule);
   addEventListener('hashchange', debouncedReevaluation.schedule);
+  getDarkColorSchemeQuery()?.addEventListener('change', debouncedReevaluation.schedule);
 }
 
 async function initialize(): Promise<void> {
@@ -81,13 +95,25 @@ async function initialize(): Promise<void> {
   }
 }
 
-installPreload();
+if (isSystemDark()) {
+  installPreload();
+}
 void initialize();
 
-chrome.runtime.onMessage.addListener((message: unknown): void => {
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse): boolean => {
   const candidate = message as Partial<SettingsChangedMessage>;
   if (candidate.type === 'settings-changed') {
     settings = validateSettings(candidate.settings);
-    debouncedReevaluation.schedule();
+    const state = reevaluate();
+    sendResponse(state);
+    return false;
+  }
+  return false;
+});
+
+(chrome.storage as typeof chrome.storage | undefined)?.onChanged.addListener((changes, areaName): void => {
+  if (areaName === 'local' && 'settingsV1' in changes && changes.settingsV1.newValue !== undefined) {
+    settings = validateSettings(changes.settingsV1.newValue);
+    reevaluate();
   }
 });
