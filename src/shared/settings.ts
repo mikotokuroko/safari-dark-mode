@@ -1,5 +1,7 @@
 import type {SettingsV1, SiteMode} from './contracts';
 
+export const SETTINGS_STORAGE_KEY = 'settingsV1';
+
 export const DEFAULT_SETTINGS: SettingsV1 = Object.freeze({
   schemaVersion: 1,
   enabled: true,

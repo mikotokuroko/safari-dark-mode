@@ -1,11 +1,11 @@
 import type {PageState, SettingsChangedMessage, SettingsV1} from '../shared/contracts';
 import {createDebouncedTask} from '../shared/debounce';
 import {decidePolicy} from '../shared/policy';
-import {validateSettings} from '../shared/settings';
+import {SETTINGS_STORAGE_KEY, validateSettings} from '../shared/settings';
 import {detectNativeDark, observeThemeChanges} from './detector';
 import {disableEngine, enableEngine} from './engine';
 import {getDetectorHint} from './upstream-config';
-import {sendRuntimeMessage} from '../shared/webextension';
+import {sendRuntimeMessage, storageGet} from '../shared/webextension';
 
 const PRELOAD_ID = 'safari-dark-mode-preload';
 let settings: SettingsV1;
@@ -94,9 +94,20 @@ function watchChanges(): void {
   getDarkColorSchemeQuery()?.addEventListener('change', debouncedReevaluation.schedule);
 }
 
+async function loadInitialSettings(): Promise<SettingsV1> {
+  const storage = chrome.storage as typeof chrome.storage | undefined;
+  if (storage?.local !== undefined) {
+    const stored = await storageGet(SETTINGS_STORAGE_KEY);
+    if (SETTINGS_STORAGE_KEY in stored) {
+      return validateSettings(stored[SETTINGS_STORAGE_KEY]);
+    }
+  }
+  return validateSettings(await sendRuntimeMessage({type: 'get-settings'}));
+}
+
 async function initialize(): Promise<void> {
   try {
-    settings = validateSettings(await sendRuntimeMessage({type: 'get-settings'}));
+    settings = await loadInitialSettings();
     reevaluate();
     watchChanges();
   } catch {
@@ -122,8 +133,9 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse): 
 });
 
 (chrome.storage as typeof chrome.storage | undefined)?.onChanged.addListener((changes, areaName): void => {
-  if (areaName === 'local' && 'settingsV1' in changes && changes.settingsV1.newValue !== undefined) {
-    settings = validateSettings(changes.settingsV1.newValue);
+  const entry = changes[SETTINGS_STORAGE_KEY];
+  if (areaName === 'local' && entry?.newValue !== undefined) {
+    settings = validateSettings(entry.newValue);
     reevaluate();
   }
 });
