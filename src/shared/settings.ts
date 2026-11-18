@@ -1,5 +1,7 @@
 import type {SettingsV1, SiteMode} from './contracts';
 
+export const SETTINGS_STORAGE_KEY = 'settingsV1';
+
 export const DEFAULT_SETTINGS: SettingsV1 = Object.freeze({
   schemaVersion: 1,
   enabled: true,
@@ -35,7 +37,7 @@ function normalizeSiteModes(value: unknown): Readonly<Record<string, SiteMode>> 
   for (const [rawHostname, rawMode] of Object.entries(value as Readonly<Record<string, unknown>>)) {
     const hostname = normalizeHostname(rawHostname);
     if (hostname !== '' && (rawMode === 'auto' || rawMode === 'off' || rawMode === 'force')) {
-      if (rawMode !== 'force') {
+      if (rawMode !== 'auto') {
         modes[hostname] = rawMode;
       }
     }
@@ -62,7 +64,7 @@ export function withSiteMode(settings: SettingsV1, rawHostname: string, mode: Si
   if (hostname === '') {
     return settings;
   }
-  if (mode === 'force') {
+  if (mode === 'auto') {
     const siteModes = Object.fromEntries(
       Object.entries(settings.siteModes).filter(([existingHostname]) => existingHostname !== hostname),
     );

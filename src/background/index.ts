@@ -8,10 +8,21 @@ const pageStates = new Map<number, PageState>();
 
 async function broadcastSettings(settings: SettingsChangedMessage['settings']): Promise<void> {
   const tabs = await queryTabs({});
-  await Promise.all(tabs.flatMap((tab) => tab.id === undefined ? [] : [
-    sendTabMessage(tab.id, {type: 'settings-changed', settings} satisfies SettingsChangedMessage)
-      .catch(() => undefined),
-  ]));
+  await Promise.all(tabs.flatMap((tab) => {
+    const tabId = tab.id;
+    if (tabId === undefined) {
+      return [];
+    }
+    return [
+      sendTabMessage<PageState | undefined>(tabId, {type: 'settings-changed', settings} satisfies SettingsChangedMessage)
+        .then((state) => {
+          if (state !== undefined && typeof state.status === 'string') {
+            pageStates.set(tabId, state);
+          }
+        })
+        .catch(() => undefined),
+    ];
+  }));
 }
 
 async function handleRequest(

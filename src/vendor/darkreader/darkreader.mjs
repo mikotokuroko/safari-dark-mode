@@ -1,5 +1,5 @@
 /**
- * Dark Reader v4.9.129
+ * Dark Reader v4.9.135
  * https://darkreader.org/
  */
 
@@ -95,14 +95,16 @@ const isFirefox =
 const isSafari = userAgent.includes("safari") && !isChromium;
 const isWindows = platform.startsWith("win");
 const isMacOS = platform.startsWith("mac");
-isNavigatorDefined && navigator.userAgentData
-    ? navigator.userAgentData.mobile
-    : userAgent.includes("mobile") || false;
+const isMobile =
+    isNavigatorDefined && navigator.userAgentData
+        ? navigator.userAgentData.mobile
+        : userAgent.includes("mobile") || false;
 const isShadowDomSupported = typeof ShadowRoot === "function";
 const isMatchMediaChangeEventListenerSupported =
     typeof MediaQueryList === "function" &&
     typeof MediaQueryList.prototype.addEventListener === "function";
 const isLayerRuleSupported = typeof CSSLayerBlockRule === "function";
+const isContainerRuleSupported = typeof CSSContainerRule === "function";
 (() => {
     const m = userAgent.match(/chrom(?:e|ium)(?:\/| )([^ ]+)/);
     if (m && m[1]) {
@@ -145,13 +147,14 @@ const isCSSColorSchemePropSupported = (() => {
 })();
 
 async function getOKResponse(url, mimeType, origin) {
-    const credentials =
-        origin && url.startsWith(`${origin}/`) ? undefined : "omit";
+    const sameOrigin = origin && url.startsWith(`${origin}/`);
+    const credentials = sameOrigin ? undefined : "omit";
+    const redirect = mimeType === "text/css" ? undefined : "error";
     const response = await fetch(url, {
         cache: "force-cache",
         credentials,
         referrer: origin,
-        redirect: "error"
+        redirect
     });
     if (
         isFirefox &&
@@ -161,14 +164,19 @@ async function getOKResponse(url, mimeType, origin) {
     ) {
         return response;
     }
+    const contentType = response.headers.get("Content-Type");
     if (
         mimeType &&
-        !(
-            response.headers.get("Content-Type") === mimeType ||
-            response.headers.get("Content-Type").startsWith(`${mimeType};`)
-        )
+        !(contentType === mimeType || contentType?.startsWith(`${mimeType};`))
     ) {
         throw new Error(`Mime type mismatch when loading ${url}`);
+    }
+    if (
+        response.redirected &&
+        response.url &&
+        shouldIgnoreCors(new URL(response.url))
+    ) {
+        throw new Error("Cross-origin limit reached");
     }
     if (!response.ok) {
         throw new Error(
@@ -177,19 +185,20 @@ async function getOKResponse(url, mimeType, origin) {
     }
     return response;
 }
-async function loadAsDataURL(url, mimeType) {
-    const response = await getOKResponse(url, mimeType);
+async function loadAsDataURL(url, mimeType, origin) {
+    const response = await getOKResponse(url, mimeType, origin);
     return await readResponseAsDataURL(response);
 }
-async function loadAsBlob(url, mimeType) {
-    const response = await getOKResponse(url, mimeType);
+async function loadAsBlob(url, mimeType, origin) {
+    const response = await getOKResponse(url, mimeType, origin);
     return await response.blob();
 }
 async function readResponseAsDataURL(response) {
     const blob = await response.blob();
-    const dataURL = await new Promise((resolve) => {
+    const dataURL = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onloadend = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
         reader.readAsDataURL(blob);
     });
     return dataURL;
@@ -197,6 +206,76 @@ async function readResponseAsDataURL(response) {
 async function loadAsText(url, mimeType, origin) {
     const response = await getOKResponse(url, mimeType, origin);
     return await response.text();
+}
+const MAX_CORS_HOSTS = 16;
+const corsHosts = new Set();
+const checkedOrigins = new Set();
+const localAliases = [
+    "127-0-0-1.org.uk",
+    "42foo.com",
+    "domaincontrol.com",
+    "fbi.com",
+    "fuf.me",
+    "lacolhost.com",
+    "local.sisteminha.com",
+    "localfabriek.nl",
+    "localhost",
+    "localhst.co.uk",
+    "localmachine.info",
+    "localmachine.name",
+    "localtest.me",
+    "lvh.me",
+    "mouse-potato.com",
+    "nip.io",
+    "sslip.io",
+    "vcap.me",
+    "xip.io",
+    "yoogle.com"
+];
+const localSubDomains = [
+    ".corp",
+    ".direct",
+    ".home",
+    ".internal",
+    ".intranet",
+    ".lan",
+    ".local",
+    ".localdomain",
+    ".test",
+    ".zz",
+    ...localAliases.map((alias) => `.${alias}`)
+];
+function isIPHost(hostname) {
+    if (hostname.startsWith("[")) {
+        return true;
+    }
+    const labels = hostname.split(".");
+    const last = labels[labels.length - 1];
+    return /^(0x[0-9a-f]+|\d+)$/i.test(last);
+}
+function shouldIgnoreCors(url) {
+    const {host, port, protocol} = url;
+    const hostname = url.hostname.endsWith(".")
+        ? url.hostname.slice(0, -1)
+        : url.hostname;
+    if (!corsHosts.has(host)) {
+        corsHosts.add(host);
+    }
+    if (checkedOrigins.has(url.origin)) {
+        return false;
+    }
+    if (
+        corsHosts.size >= MAX_CORS_HOSTS ||
+        protocol !== "https:" ||
+        port !== "" ||
+        localAliases.includes(hostname) ||
+        localSubDomains.some((sub) => hostname.endsWith(sub)) ||
+        isIPHost(hostname)
+    ) {
+        return true;
+    }
+    checkedOrigins.add(url.origin);
+    return false;
 }
 
 const throwCORSError = async (url) => {
@@ -1966,6 +2045,13 @@ function iterateCSSRules(
                 onImportError,
                 importedSheets
             );
+        } else if (isContainerRule(rule)) {
+            iterateCSSRules(
+                rule.cssRules,
+                iterate,
+                onImportError,
+                importedSheets
+            );
         } else {
             logWarn(`CSSRule type not supported`, rule);
         }
@@ -2106,6 +2192,7 @@ const importRules = new WeakSet();
 const mediaRules = new WeakSet();
 const supportsRules = new WeakSet();
 const layerRules = new WeakSet();
+const containerRules = new WeakSet();
 function isStyleRule(rule) {
     if (!rule) {
         return false;
@@ -2183,6 +2270,33 @@ function isLayerRule(rule) {
     }
     return false;
 }
+function isContainerRule(rule) {
+    if (!rule) {
+        return false;
+    }
+    if (styleRules.has(rule)) {
+        return false;
+    }
+    if (containerRules.has(rule)) {
+        return true;
+    }
+    if (isContainerRuleSupported && rule instanceof CSSContainerRule) {
+        containerRules.add(rule);
+        return true;
+    }
+    return false;
+}
+function getRuleMediaText(rule) {
+    const media = [];
+    let parent = rule.parentRule;
+    while (parent) {
+        if (isMediaRule(parent)) {
+            media.unshift(parent.media.mediaText);
+        }
+        parent = parent.parentRule;
+    }
+    return media.join(" and ");
+}
 
 const sheetsScopes = new WeakMap();
 function defineSheetScope(sheet, node) {
@@ -2208,14 +2322,31 @@ function getSheetScope(sheet) {
 
 let variablesSheet;
 const registeredColors = new Map();
+function getVariablesRule() {
+    if (!variablesSheet) {
+        return null;
+    }
+    const rules = variablesSheet.cssRules;
+    for (let i = 0; i < rules.length; i++) {
+        const rule = rules[i];
+        if (rule.selectorText === ":root" && rule.style) {
+            return rule;
+        }
+    }
+    return null;
+}
 function registerVariablesSheet(sheet) {
     variablesSheet = sheet;
+    const rule = getVariablesRule();
+    if (!rule) {
+        return;
+    }
     const types = ["background", "text", "border"];
     registeredColors.forEach((registered) => {
         types.forEach((type) => {
             if (registered[type]) {
                 const {variable, value} = registered[type];
-                variablesSheet?.cssRules[0]?.style.setProperty(variable, value);
+                rule.style.setProperty(variable, value);
             }
         });
     });
@@ -2247,9 +2378,7 @@ function registerColor(type, parsed, value) {
     }
     const variable = `--darkreader-${type}-${hex.replace("#", "")}`;
     registered[type] = {variable, value};
-    if (variablesSheet?.cssRules[0]?.style) {
-        variablesSheet?.cssRules[0].style.setProperty(variable, value);
-    }
+    getVariablesRule()?.style.setProperty(variable, value);
     return getRegisteredVariableValue(type, registered);
 }
 function getColorPalette() {
@@ -2729,76 +2858,6 @@ chrome.runtime.onMessage.addListener(({type, data, error, id}) => {
         }
     }
 });
-const MAX_CORS_HOSTS = 16;
-const corsHosts = new Set();
-const checkedHosts = new Set();
-const localAliases = [
-    "127-0-0-1.org.uk",
-    "42foo.com",
-    "domaincontrol.com",
-    "fbi.com",
-    "fuf.me",
-    "lacolhost.com",
-    "local.sisteminha.com",
-    "localfabriek.nl",
-    "localhost",
-    "localhst.co.uk",
-    "localmachine.info",
-    "localmachine.name",
-    "localtest.me",
-    "lvh.me",
-    "mouse-potato.com",
-    "nip.io",
-    "sslip.io",
-    "vcap.me",
-    "xip.io",
-    "yoogle.com"
-];
-const localSubDomains = [
-    ".corp",
-    ".direct",
-    ".home",
-    ".internal",
-    ".intranet",
-    ".lan",
-    ".local",
-    ".localdomain",
-    ".test",
-    ".zz",
-    ...localAliases.map((alias) => `.${alias}`)
-];
-function isIPHost(hostname) {
-    if (hostname.startsWith("[")) {
-        return true;
-    }
-    const labels = hostname.split(".");
-    const last = labels[labels.length - 1];
-    return /^(0x[0-9a-f]+|\d+)$/i.test(last);
-}
-function shouldIgnoreCors(url) {
-    const {host, port, protocol} = url;
-    const hostname = url.hostname.endsWith(".")
-        ? url.hostname.slice(0, -1)
-        : url.hostname;
-    if (!corsHosts.has(host)) {
-        corsHosts.add(host);
-    }
-    if (checkedHosts.has(host)) {
-        return false;
-    }
-    if (
-        corsHosts.size >= MAX_CORS_HOSTS ||
-        protocol !== "https:" ||
-        port !== "" ||
-        localAliases.includes(hostname) ||
-        localSubDomains.some((sub) => hostname.endsWith(sub)) ||
-        isIPHost(hostname)
-    ) {
-        return true;
-    }
-    checkedHosts.add(host);
-    return false;
-}
 
 const imageManager = new AsyncQueue();
 async function getImageDetails(url) {
@@ -3025,7 +3084,7 @@ function analyzeImage(image) {
               r: Math.round(sumR / opaquePixelsCount),
               g: Math.round(sumG / opaquePixelsCount),
               b: Math.round(sumB / opaquePixelsCount),
-              a: transparentPixelsCount / totalPixelsCount
+              a: opaquePixelsCount / totalPixelsCount
           }
         : null;
     return {
@@ -3273,8 +3332,9 @@ function getModifiableCSSDeclaration(
         property === "list-style-image"
     ) {
         const selectorText = rule.selectorText;
+        const media = getRuleMediaText(rule);
         const pushFilter = selectorText
-            ? (type) => pushFilterSelector(selectorText, type)
+            ? (type) => pushFilterSelector(selectorText, type, media)
             : null;
         modifier = getBgImageModifier(
             value,
@@ -3380,7 +3440,7 @@ function getModifiedUserAgentStyle(theme, isIFrame, styleSystemControls) {
         lines.push(getModifiedSelectionStyle(theme));
     }
     if (isLayerRuleSupported) {
-        lines.unshift("@layer {");
+        lines.unshift(`@layer darkreader {`);
         lines.push("}");
     }
     return lines.join("\n");
@@ -3473,9 +3533,9 @@ let addFilterSelector$1 = null;
 function setFilterSelectorHandler(fn) {
     addFilterSelector$1 = fn;
 }
-function pushFilterSelector(selector, type) {
+function pushFilterSelector(selector, type, media = "") {
     if (selector && addFilterSelector$1) {
-        addFilterSelector$1(selector, type);
+        addFilterSelector$1(selector, type, media);
     }
 }
 const filterCompatibleProps = new Set([
@@ -4469,7 +4529,8 @@ class VariablesStore {
     }
     inspectVariable(varName, value) {
         this.unstableVarValues.set(varName, value);
-        if (isVarDependant(value) && isConstructedColorVar(value)) {
+        const hasVar = isVarDependant(value);
+        if (hasVar && isConstructedColorVar(value)) {
             if (!this.unknownColorVars.has(varName)) {
                 this.unknownColorVars.add(varName);
                 this.varsChanged = true;
@@ -4481,15 +4542,17 @@ class VariablesStore {
         }
         this.definedVars.add(varName);
         this.varsChanged = true;
+        const valueOrFallback = hasVar ? getVarFallback(value) : value;
         const isColor = Boolean(
-            getRGBValues(value) || parseColorWithCache(value)
+            getRGBValues(valueOrFallback) ||
+            parseColorWithCache(valueOrFallback)
         );
         if (isColor) {
             this.unknownColorVars.add(varName);
         } else if (
-            value.includes("url(") ||
-            value.includes("linear-gradient(") ||
-            value.includes("radial-gradient(")
+            valueOrFallback.includes("url(") ||
+            valueOrFallback.includes("linear-gradient(") ||
+            valueOrFallback.includes("radial-gradient(")
         ) {
             this.resolveVariableType(varName, VAR_TYPE_BG_IMG);
         }
@@ -4619,7 +4682,7 @@ class VariablesStore {
     setOnRootVariableChange(callback) {
         this.onRootVariableDefined = callback;
     }
-    putRootVars(styleElement, theme) {
+    getRootVarsText(theme) {
         const declarations = new Map();
         iterateCSSDeclarations(
             document.documentElement.style,
@@ -4656,7 +4719,10 @@ class VariablesStore {
             cssLines.push(`    ${property}: ${value};`);
         }
         cssLines.push("}");
-        const cssText = cssLines.join("\n");
+        return cssLines.join("\n");
+    }
+    putRootVars(styleElement, theme) {
+        const cssText = this.getRootVarsText(theme);
         const sheet = styleElement.sheet;
         if (sheet) {
             if (sheet.cssRules.length > 0) {
@@ -4751,6 +4817,15 @@ function replaceCSSVariablesNames(
         return `var(${newName}, ${newFallback})`;
     };
     return replaceVariablesMatches(value, matchReplacer);
+}
+function getVarFallback(value) {
+    return replaceVariablesMatches(value, (match) => {
+        const {fallback} = getVariableNameAndFallback(match);
+        if (!fallback) {
+            return "";
+        }
+        return isVarDependant(fallback) ? getVarFallback(fallback) : fallback;
+    });
 }
 function iterateVarDependencies(value, iterator) {
     replaceCSSVariablesNames(value, (varName) => {
@@ -4935,15 +5010,35 @@ function getThemeKey$1(theme) {
 const asyncQueue = createAsyncTasksQueue();
 function createStyleSheetModifier() {
     let renderId = 0;
-    function getStyleRuleHash(rule) {
-        let cssText = rule.cssText;
+    let cssTextCounter = 0;
+    const cssTextIds = new Map();
+    function getCSSTextKey(cssText) {
+        const existing = cssTextIds.get(cssText);
+        if (existing !== undefined) {
+            return existing;
+        }
+        let n = ++cssTextCounter;
+        let key = "";
+        do {
+            key = String.fromCharCode(n & 0xffff) + key;
+            n >>>= 16;
+        } while (n > 0);
+        cssTextIds.set(cssText, key);
+        return key;
+    }
+    function getStyleRuleKey(rule) {
+        let key = getCSSTextKey(rule.cssText);
         if (isMediaRule(rule.parentRule)) {
-            cssText = `${rule.parentRule.media.mediaText} { ${cssText} }`;
+            key = `${getCSSTextKey(rule.parentRule.media.mediaText)}{${key}}`;
         }
         if (isLayerRule(rule.parentRule)) {
-            cssText = `${rule.parentRule.name} { ${cssText} }`;
+            key = `${getCSSTextKey(rule.parentRule.name)}{${key}}`;
         }
-        return getHashCode(cssText);
+        if (isContainerRule(rule.parentRule)) {
+            const {containerName, containerQuery} = rule.parentRule;
+            key = `${getCSSTextKey(`${containerName} ${containerQuery}`)}{${key}}`;
+        }
+        return key;
     }
     const rulesTextCache = new Set();
     const rulesModCache = new Map();
@@ -4974,17 +5069,17 @@ function createStyleSheetModifier() {
         iterateCSSRules(
             rules,
             (rule) => {
-                const hash = getStyleRuleHash(rule);
+                const key = getStyleRuleKey(rule);
                 let textDiffersFromPrev = false;
-                notFoundCacheKeys.delete(hash);
-                if (!rulesTextCache.has(hash)) {
-                    rulesTextCache.add(hash);
+                notFoundCacheKeys.delete(key);
+                if (!rulesTextCache.has(key)) {
+                    rulesTextCache.add(key);
                     textDiffersFromPrev = true;
                 }
                 if (textDiffersFromPrev) {
                     rulesChanged = true;
                 } else {
-                    modRules.push(rulesModCache.get(hash));
+                    modRules.push(rulesModCache.get(key));
                     return;
                 }
                 if (rule.style.all === "revert") {
@@ -5015,7 +5110,7 @@ function createStyleSheetModifier() {
                     };
                     modRules.push(modRule);
                 }
-                rulesModCache.set(hash, modRule);
+                rulesModCache.set(key, modRule);
             },
             () => {
                 hasNonLoadedLink = true;
@@ -5142,9 +5237,9 @@ function createStyleSheetModifier() {
                     let oldDecs = [];
                     if (varDecs.length === 0) {
                         const tempDec = {
-                            property,
-                            value: sourceValue,
-                            important,
+                            property: `--darkreader-placeholder-${varKey}`,
+                            value: "none",
+                            important: false,
                             sourceValue,
                             varKey
                         };
@@ -5262,6 +5357,15 @@ function createStyleSheetModifier() {
                     parent.insertRule(`@layer ${name} {}`, index);
                     return parent.cssRules[index];
                 }
+                if (isContainerRule(rule)) {
+                    const {containerName, containerQuery} = rule;
+                    const index = parent.cssRules.length;
+                    const query = containerName
+                        ? `${containerName} ${containerQuery}`
+                        : containerQuery;
+                    parent.insertRule(`@container ${query} {}`, index);
+                    return parent.cssRules[index];
+                }
                 return parent;
             }
             function iterateReadyRules(group, target, styleIterator) {
@@ -5311,6 +5415,7 @@ document.addEventListener(
 );
 const overrides$1 = new WeakSet();
 const overridesBySource = new WeakMap();
+const drSheetCheckResults = new WeakMap();
 function canHaveAdoptedStyleSheets(node) {
     return Array.isArray(node.adoptedStyleSheets);
 }
@@ -5324,11 +5429,24 @@ const createOverrideSheet = isFirefox
           return new pageWindow.CSSStyleSheet();
       }
     : () => new CSSStyleSheet();
+function isDarkReaderSheet(sheet) {
+    let result = drSheetCheckResults.get(sheet);
+    if (result != null) {
+        return result;
+    }
+    result = Boolean(
+        sheet &&
+        sheet.cssRules.length > 0 &&
+        sheet.cssRules[0].selectorText?.startsWith("#__darkreader")
+    );
+    drSheetCheckResults.set(sheet, result);
+    return result;
+}
 function createAdoptedStyleSheetOverride(node) {
     let cancelAsyncOperations = false;
     function iterateSourceSheets(iterator) {
         forEach(getAdoptedSheets(node), (sheet) => {
-            if (!overrides$1.has(sheet)) {
+            if (!overrides$1.has(sheet) && !isDarkReaderSheet(sheet)) {
                 iterator(sheet);
             }
             defineSheetScope(sheet, node);
@@ -5382,7 +5500,10 @@ function createAdoptedStyleSheetOverride(node) {
             count += sheet.cssRules.length;
         });
         if (count === 1) {
-            const rule = getAdoptedSheets(node)[0].cssRules[0];
+            const sourceSheet = getAdoptedSheets(node).find(
+                (s) => !overrides$1.has(s) && !isDarkReaderSheet(s)
+            );
+            const rule = sourceSheet?.cssRules[0];
             return rule instanceof CSSStyleRule ? rule.style.length : count;
         }
         return count;
@@ -5394,7 +5515,7 @@ function createAdoptedStyleSheetOverride(node) {
         const sheets = getAdoptedSheets(node);
         for (let i = sheets.length - 1; i >= 0; i--) {
             const sheet = sheets[i];
-            if (overrides$1.has(sheet)) {
+            if (overrides$1.has(sheet) || isDarkReaderSheet(sheet)) {
                 continue;
             }
             sourceSheets.add(sheet);
@@ -5440,7 +5561,7 @@ function createAdoptedStyleSheetOverride(node) {
         queueMicrotask(() => {
             callbackRequested = false;
             const sheets = getAdoptedSheets(node).filter(
-                (s) => !overrides$1.has(s)
+                (s) => !overrides$1.has(s) && !isDarkReaderSheet(s)
             );
             sheets.forEach((sheet) => overridesBySource.delete(sheet));
             callback(sheets);
@@ -5511,7 +5632,7 @@ function getStyleInjectionMode() {
     return mode;
 }
 const stylesWaitingForBody = new Set();
-let bodyObserver;
+let bodyObserver = null;
 function injectStyleAway(styleElement) {
     if (!document.body) {
         stylesWaitingForBody.add(styleElement);
@@ -5524,6 +5645,7 @@ function injectStyleAway(styleElement) {
                     stylesWaitingForBody.clear();
                 }
             });
+            bodyObserver.observe(document, {childList: true, subtree: true});
         }
         return;
     }
@@ -5557,6 +5679,8 @@ function injectStyleAway(styleElement) {
 let containerObserver;
 function removeStyleContainer() {
     bodyObserver?.disconnect();
+    bodyObserver = null;
+    stylesWaitingForBody.clear();
     containerObserver?.disconnect();
     document.querySelector(".darkreader-style-container")?.remove();
 }
@@ -5836,10 +5960,14 @@ function stopWatchingForInlineStyles() {
     treeObservers.clear();
     attrObservers.clear();
     inlineStringValueCache.clear();
+    inlineStyleCache = new WeakMap();
+    svgInversionCache = new WeakSet();
+    svgAnalysisConditionCache = new WeakMap();
+    resetInlineStyleLoopDetection();
 }
-const inlineStyleCache = new WeakMap();
-const svgInversionCache = new WeakSet();
-const svgAnalysisConditionCache = new WeakMap();
+let inlineStyleCache = new WeakMap();
+let svgInversionCache = new WeakSet();
+let svgAnalysisConditionCache = new WeakMap();
 const themeProps = ["brightness", "contrast", "grayscale", "sepia", "mode"];
 function shouldAnalyzeSVGAsImage(svg) {
     if (svgAnalysisConditionCache.has(svg)) {
@@ -5868,9 +5996,9 @@ function getThemeKey(theme) {
     return themeKey;
 }
 function getInlineStyleCacheKey(el, theme) {
-    const attrKey = INLINE_STYLE_ATTRS.map(
-        (attr) => `${attr}="${el.getAttribute(attr)}"`
-    );
+    const attrKey = INLINE_STYLE_ATTRS.filter((attr) =>
+        el.hasAttribute(attr)
+    ).map((attr) => `${attr}="${el.getAttribute(attr)}"`);
     return `${attrKey} ${getThemeKey(theme)}`;
 }
 function shouldIgnoreInlineStyle(element, selectors) {
@@ -5882,10 +6010,6 @@ function shouldIgnoreInlineStyle(element, selectors) {
     }
     return false;
 }
-const LOOP_DETECTION_THRESHOLD = 1000;
-const MAX_LOOP_CYCLES = 10;
-const elementsLastChanges = new WeakMap();
-const elementsLoopCycles = new WeakMap();
 const SMALL_SVG_THRESHOLD = 32;
 const svgNodesRoots = new WeakMap();
 const svgRootSizeTestResults = new WeakMap();
@@ -5905,25 +6029,54 @@ function getSVGElementRoot(svgElement) {
     return root;
 }
 const inlineStringValueCache = new Map();
+const MAX_LOOP_TEARDOWNS = 10;
+const inlineStyleParents = new Map();
+let parentTeardownCounts = new WeakMap();
+function trackInlineStyleTeardown(element) {
+    const parent = element.parentNode;
+    if (!parent) {
+        return;
+    }
+    if (inlineStyleParents.size === 0) {
+        queueMicrotask(checkForTeardown);
+    }
+    inlineStyleParents.set(element, parent);
+}
+function checkForTeardown() {
+    inlineStyleParents.forEach((parent, element) => {
+        if (element.isConnected || !parent.isConnected) {
+            return;
+        }
+        const count = (parentTeardownCounts.get(parent) ?? 0) + 1;
+        parentTeardownCounts.set(parent, count);
+        if (count === MAX_LOOP_TEARDOWNS) {
+            logWarn(
+                "Inline style change causes DOM teardown. Suspending changes for the container",
+                parent
+            );
+        }
+    });
+    inlineStyleParents.clear();
+}
+function parentHadTeardown(element) {
+    const parent = element.parentNode;
+    if (!parent) {
+        return true;
+    }
+    return (parentTeardownCounts.get(parent) ?? 0) >= MAX_LOOP_TEARDOWNS;
+}
+function resetInlineStyleLoopDetection() {
+    inlineStyleParents.clear();
+    parentTeardownCounts = new WeakMap();
+}
 function overrideInlineStyle(
     element,
     theme,
     ignoreInlineSelectors,
     ignoreImageSelectors
 ) {
-    if (elementsLastChanges.has(element)) {
-        if (
-            Date.now() - elementsLastChanges.get(element) <
-            LOOP_DETECTION_THRESHOLD
-        ) {
-            const cycles = elementsLoopCycles.get(element) ?? 0;
-            elementsLoopCycles.set(element, cycles + 1);
-        } else {
-            elementsLoopCycles.delete(element);
-        }
-        if ((elementsLoopCycles.get(element) ?? 0) >= MAX_LOOP_CYCLES) {
-            return;
-        }
+    if (parentHadTeardown(element)) {
+        return;
     }
     if (element.parentElement?.dataset.nodeViewContent) {
         return;
@@ -5933,7 +6086,14 @@ function overrideInlineStyle(
         return;
     }
     const unsetProps = new Set(Object.keys(overrides));
-    function setCustomProp(targetCSSProp, modifierCSSProp, cssVal) {
+    function overrideValue(
+        sourceAttr,
+        sourceCSSProp,
+        targetCSSProp,
+        modifierCSSProp,
+        srcVal,
+        cssVal
+    ) {
         const cachedStringValue = inlineStringValueCache
             .get(modifierCSSProp)
             ?.get(cssVal);
@@ -5960,6 +6120,7 @@ function overrideInlineStyle(
             if (!element.hasAttribute(dataAttr)) {
                 element.setAttribute(dataAttr, "");
             }
+            trackInlineStyleTeardown(element);
             unsetProps.delete(targetCSSProp);
         }
         function setVarDeclaration(mod) {
@@ -6064,11 +6225,19 @@ function overrideInlineStyle(
         }
     }
     if (element.hasAttribute("bgcolor")) {
-        let value = element.getAttribute("bgcolor");
+        const attrValue = element.getAttribute("bgcolor");
+        let value = attrValue;
         if (value.match(/^[0-9a-f]{3}$/i) || value.match(/^[0-9a-f]{6}$/i)) {
             value = `#${value}`;
         }
-        setCustomProp("background-color", "background-color", value);
+        overrideValue(
+            "bgcolor",
+            "",
+            "background-color",
+            "background-color",
+            attrValue,
+            value
+        );
     }
     if (
         (element === document.documentElement || element === document.body) &&
@@ -6080,17 +6249,25 @@ function overrideInlineStyle(
             element.getAttribute("background") ?? ""
         );
         const value = `url("${url}")`;
-        setCustomProp("background-image", "background-image", value);
+        overrideValue(
+            "background",
+            "",
+            "background-image",
+            "background-image",
+            url,
+            value
+        );
     }
     if (element.hasAttribute("color") && element.rel !== "mask-icon") {
-        let value = element.getAttribute("color");
+        const attrValue = element.getAttribute("color");
+        let value = attrValue;
         if (value.match(/^[0-9a-f]{3}$/i) || value.match(/^[0-9a-f]{6}$/i)) {
             value = `#${value}`;
         } else if (value.match(/^#?[0-9a-f]{4}$/i)) {
             const hex = value.startsWith("#") ? value.substring(1) : value;
             value = `#${hex}00`;
         }
-        setCustomProp("color", "color", value);
+        overrideValue("color", "", "color", "color", attrValue, value);
     }
     if (isSVGElement) {
         if (element.hasAttribute("fill")) {
@@ -6109,7 +6286,7 @@ function overrideInlineStyle(
                             const svgBounds = root.getBoundingClientRect();
                             isSVGSmall =
                                 svgBounds.width * svgBounds.height <=
-                                Math.pow(SMALL_SVG_THRESHOLD, 2);
+                                SMALL_SVG_THRESHOLD ** 2;
                             svgRootSizeTestResults.set(root, isSVGSmall);
                         }
                         let isBg;
@@ -6122,9 +6299,12 @@ function overrideInlineStyle(
                                 width > SMALL_SVG_THRESHOLD ||
                                 height > SMALL_SVG_THRESHOLD;
                         }
-                        setCustomProp(
+                        overrideValue(
+                            "fill",
+                            "",
                             "fill",
                             isBg ? "background-color" : "color",
+                            value,
                             value
                         );
                     };
@@ -6134,28 +6314,30 @@ function overrideInlineStyle(
                         addReadyStateCompleteListener(handleSVGElement);
                     }
                 } else {
-                    setCustomProp("fill", "color", value);
+                    overrideValue("fill", "", "fill", "color", value, value);
                 }
             }
         }
         if (element.hasAttribute("stop-color")) {
-            setCustomProp(
+            const value = element.getAttribute("stop-color");
+            overrideValue(
+                "stop-color",
+                "",
                 "stop-color",
                 "background-color",
-                element.getAttribute("stop-color")
+                value,
+                value
             );
         }
     }
     if (element.hasAttribute("stroke")) {
         const value = element.getAttribute("stroke");
-        setCustomProp(
-            "stroke",
+        const cssProp =
             element instanceof SVGLineElement ||
-                element instanceof SVGTextElement
+            element instanceof SVGTextElement
                 ? "border-color"
-                : "color",
-            value
-        );
+                : "color";
+        overrideValue("stroke", "", "stroke", cssProp, value, value);
     }
     element.style &&
         iterateCSSDeclarations(element.style, (property, value) => {
@@ -6164,7 +6346,14 @@ function overrideInlineStyle(
                     element === document.documentElement ||
                     element === document.body
                 ) {
-                    setCustomProp(property, property, value);
+                    overrideValue(
+                        "style",
+                        property,
+                        property,
+                        property,
+                        value,
+                        value
+                    );
                 }
                 return;
             }
@@ -6172,9 +6361,23 @@ function overrideInlineStyle(
                 overrides.hasOwnProperty(property) ||
                 (property.startsWith("--") && !normalizedPropList[property])
             ) {
-                setCustomProp(property, property, value);
+                overrideValue(
+                    "style",
+                    property,
+                    property,
+                    property,
+                    value,
+                    value
+                );
             } else if (shorthandOverrides[property] && value.includes("var(")) {
-                setCustomProp(property, property, value);
+                overrideValue(
+                    "style",
+                    property,
+                    property,
+                    property,
+                    value,
+                    value
+                );
             } else {
                 const overriddenProp = normalizedPropList[property];
                 if (
@@ -6197,7 +6400,8 @@ function overrideInlineStyle(
         element instanceof SVGTextElement &&
         element.style.fill
     ) {
-        setCustomProp("fill", "color", element.style.getPropertyValue("fill"));
+        const value = element.style.getPropertyValue("fill");
+        overrideValue("style", "fill", "fill", "color", value, value);
     }
     if (element.getAttribute("style")?.includes("--")) {
         variablesStore.addInlineStyleForMatching(element.style);
@@ -6206,7 +6410,6 @@ function overrideInlineStyle(
         element.removeAttribute(overrides[cssProp].dataAttr);
     });
     inlineStyleCache.set(element, getInlineStyleCacheKey(element, theme));
-    elementsLastChanges.set(element, Date.now());
 }
 
 const metaThemeColorName = "theme-color";
@@ -6261,14 +6464,19 @@ function restoreMetaThemeColor() {
     }
 }
 
-const filterSelectors = {
-    invert: new Set(),
-    dim: new Set(),
-    none: new Set()
-};
-function addFilterSelector(selector, type) {
+const mediaFilterSelectors = new Map();
+function addFilterSelector(selector, type, media = "") {
     if (!selector) {
         return;
+    }
+    let filterSelectors = mediaFilterSelectors.get(media);
+    if (!filterSelectors) {
+        filterSelectors = {
+            invert: new Set(),
+            dim: new Set(),
+            none: new Set()
+        };
+        mediaFilterSelectors.set(media, filterSelectors);
     }
     const selectors = filterSelectors[type];
     let changed = false;
@@ -6315,9 +6523,7 @@ function isSelectorWithin(sub, parent) {
     return sub[i] !== "+" && sub[i] !== "~";
 }
 function cleanFilterSelectors() {
-    filterSelectors.invert.clear();
-    filterSelectors.dim.clear();
-    filterSelectors.none.clear();
+    mediaFilterSelectors.clear();
 }
 
 const cssCommentsRegex = /\/\*[\s\S]*?\*\//g;
@@ -7173,9 +7379,7 @@ function injectProxy(enableStyleSheetsProxy, enableCustomElementRegistryProxy) {
                     let elements = getCurrentElementValue();
                     const nodeListBehavior = {
                         get: function (_, property) {
-                            return getCurrentElementValue()[
-                                Number(property) || property
-                            ];
+                            return getCurrentElementValue()[property];
                         }
                     };
                     elements = new Proxy(elements, nodeListBehavior);
@@ -7265,26 +7469,46 @@ function injectProxy(enableStyleSheetsProxy, enableCustomElementRegistryProxy) {
         overrideProperty(Document, "styleSheets", {
             get: (native) =>
                 function () {
+                    let filteredSheetsCache = null;
+                    let docSheets = null;
+                    const didChange = (newSheets) => {
+                        if (
+                            !filteredSheetsCache ||
+                            !docSheets ||
+                            docSheets.length !== newSheets.length
+                        ) {
+                            return true;
+                        }
+                        for (let i = 0; i < docSheets.length; i++) {
+                            if (docSheets[i] !== newSheets[i]) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
                     const getCurrentValue = () => {
-                        const docSheets = native.call(this);
-                        const filteredSheets = [...docSheets].filter(
+                        const nativeDocSheets = native.call(this);
+                        if (!didChange(nativeDocSheets)) {
+                            return filteredSheetsCache;
+                        }
+                        docSheets = Array.from(nativeDocSheets);
+                        const filteredSheets = docSheets.filter(
                             (styleSheet) =>
                                 styleSheet.ownerNode && !isDRSheet(styleSheet)
                         );
                         filteredSheets.item = (item) => filteredSheets[item];
-                        return Object.setPrototypeOf(
+                        filteredSheetsCache = Object.setPrototypeOf(
                             filteredSheets,
                             StyleSheetList.prototype
                         );
+                        return filteredSheetsCache;
                     };
-                    let elements = getCurrentValue();
                     const styleSheetListBehavior = {
                         get: function (_, property) {
                             return getCurrentValue()[property];
                         }
                     };
-                    elements = new Proxy(elements, styleSheetListBehavior);
-                    return elements;
+                    return new Proxy(getCurrentValue(), styleSheetListBehavior);
                 }
         });
     }
@@ -7304,9 +7528,7 @@ function injectProxy(enableStyleSheetsProxy, enableCustomElementRegistryProxy) {
         }
         if (
             sheet.cssRules.length > 0 &&
-            sheet.cssRules[0].cssText.startsWith(
-                "#__darkreader__adoptedOverride"
-            )
+            sheet.cssRules[0].selectorText?.startsWith("#__darkreader")
         ) {
             adoptedSheetOverrideCache.add(sheet);
             return true;
@@ -7560,6 +7782,27 @@ function watchForStylePositions(currentStyles, update, shadowRootDiscovered) {
     currentStyles.forEach(saveStylePosition);
     function handleStyleOperations(root, operations) {
         const {createdStyles, removedStyles, movedStyles} = operations;
+        createdStyles.forEach((s) => {
+            if (removedStyles.has(s)) {
+                if (s.isConnected) {
+                    removedStyles.delete(s);
+                } else {
+                    createdStyles.delete(s);
+                }
+            }
+        });
+        movedStyles.forEach((s) => {
+            if (createdStyles.has(s)) {
+                createdStyles.delete(s);
+            }
+            if (removedStyles.has(s)) {
+                if (s.isConnected) {
+                    removedStyles.delete(s);
+                } else {
+                    movedStyles.delete(s);
+                }
+            }
+        });
         createdStyles.forEach((s) => saveStylePosition(s));
         movedStyles.forEach((s) => saveStylePosition(s));
         removedStyles.forEach((s) => forgetStylePosition(s));
@@ -7804,46 +8047,78 @@ function stopStylePositionWatchers() {
     forEach(nodePositionWatchers.values(), (watcher) => watcher.stop());
     nodePositionWatchers.clear();
 }
-function injectStaticStyle(style, prevNode, watchAlias, callback) {
-    const mode = getStyleInjectionMode();
-    if (mode === "next") {
+class StaticStyleInjectorBase {
+    begin() {}
+}
+class HeadStaticStyleInjector extends StaticStyleInjectorBase {
+    constructor() {
+        super(...arguments);
+        this.lastStyle = null;
+    }
+    begin() {
+        this.lastStyle = null;
+    }
+    inject(id, text, position, callback) {
+        const style = createOrUpdateStyle(`darkreader--${id}`, document);
+        style.textContent = text;
+        const prevNode =
+            position === "beginning" ? this.lastStyle : document.head.lastChild;
         document.head.insertBefore(
             style,
             prevNode ? prevNode.nextSibling : document.head.firstChild
         );
-        setupNodePositionWatcher(style, watchAlias, callback);
-    } else if (mode === "away") {
-        injectStyleAway(style);
+        setupNodePositionWatcher(style, id, callback);
+        return style.sheet;
     }
 }
+class AwayStaticStyleInjector extends StaticStyleInjectorBase {
+    inject(id, text) {
+        const style = createOrUpdateStyle(`darkreader--${id}`, document);
+        style.textContent = text;
+        injectStyleAway(style);
+        return style.sheet;
+    }
+}
+function createStaticStyleInjector() {
+    const mode = getStyleInjectionMode();
+    switch (mode) {
+        case "next":
+            return new HeadStaticStyleInjector();
+        case "away":
+            return new AwayStaticStyleInjector();
+        default:
+            throw new Error(`Unknown style injection mode ${mode}`);
+    }
+}
+let staticStyleInjector;
 const scheduleInversionStyleUpdate = throttle(() => {
     const invertStyle = document.head?.querySelector(".darkreader--invert");
     if (invertStyle) {
-        setInversionStyleValue(invertStyle);
+        invertStyle.textContent = getInversionStyleValue();
     }
     shadowRootsWithOverrides.forEach((root) => {
         const shadowInvertStyle = root.querySelector(".darkreader--invert");
         if (shadowInvertStyle) {
-            setInversionStyleValue(shadowInvertStyle);
+            shadowInvertStyle.textContent = getInversionStyleValue();
         }
     });
 });
-setFilterSelectorHandler((selector, type) => {
-    const changed = addFilterSelector(selector, type);
+setFilterSelectorHandler((selector, type, media) => {
+    const changed = addFilterSelector(selector, type, media);
     if (changed) {
         scheduleInversionStyleUpdate();
     }
 });
-function setInversionStyleValue(invertStyle) {
+function getInversionStyleValue() {
     if (!theme) {
-        return;
+        return "";
     }
     const rules = [];
-    const appendRule = (selectors, filter) => {
+    const appendRule = (target, selectors, filter) => {
         if (!filter || selectors.length === 0) {
             return;
         }
-        rules.push(
+        target.push(
             [
                 `${selectors.join(", ")} {`,
                 `    filter: ${filter} !important;`,
@@ -7851,11 +8126,11 @@ function setInversionStyleValue(invertStyle) {
             ].join("\n")
         );
     };
-    const appendCounterInversion = (selectors) => {
+    const appendCounterInversion = (target, selectors) => {
         if (theme.mode === 0 || selectors.length === 0) {
             return;
         }
-        rules.push(
+        target.push(
             [
                 `${selectors.join(", ")} {`,
                 `    color: black !important;`,
@@ -7866,11 +8141,11 @@ function setInversionStyleValue(invertStyle) {
             ].join("\n")
         );
     };
-    const appendInversionCancellation = (selectors) => {
+    const appendInversionCancellation = (target, selectors) => {
         if (theme.mode === 0 || selectors.length === 0) {
             return;
         }
-        rules.push(
+        target.push(
             [
                 `${selectors.join(", ")} {`,
                 `    filter: none !important;`,
@@ -7882,13 +8157,35 @@ function setInversionStyleValue(invertStyle) {
             ].join("\n")
         );
     };
-    if (
-        (fixes && Array.isArray(fixes.invert) && fixes.invert.length > 0) ||
-        filterSelectors.invert.size > 0
-    ) {
-        const extraInversionSelectors = [...filterSelectors.invert];
+    const buildGroupRules = (media) => {
+        const group = [];
+        const configSelectors =
+            media === "" && fixes && Array.isArray(fixes.invert)
+                ? fixes.invert
+                : [];
+        const filterSelectors = mediaFilterSelectors.get(media);
+        if (
+            configSelectors.length > 0 ||
+            (filterSelectors && filterSelectors.invert.size > 0)
+        ) {
+            buildInversionRules(group, configSelectors, filterSelectors, theme);
+        }
+        if (filterSelectors && filterSelectors.dim.size > 0) {
+            buildDimRules(group, filterSelectors, theme);
+        }
+        return group;
+    };
+    const buildInversionRules = (
+        group,
+        configSelectors,
+        filterSelectors,
+        theme
+    ) => {
+        const extraInversionSelectors = filterSelectors
+            ? [...filterSelectors.invert]
+            : [];
         const invertSelectors = [
-            ...(fixes?.invert ?? []),
+            ...configSelectors,
             ...extraInversionSelectors
         ];
         const invertFilter = getCSSFilterValue({
@@ -7898,11 +8195,11 @@ function setInversionStyleValue(invertStyle) {
                     ? theme.contrast
                     : clamp(theme.contrast - 10, 0, 100)
         });
-        appendRule(invertSelectors, invertFilter);
-        appendCounterInversion(extraInversionSelectors);
-        if (filterSelectors.none.size > 0) {
+        appendRule(group, invertSelectors, invertFilter);
+        appendCounterInversion(group, extraInversionSelectors);
+        if (filterSelectors && filterSelectors.none.size > 0) {
             const noneSelectors = [...filterSelectors.none];
-            appendInversionCancellation(noneSelectors);
+            appendInversionCancellation(group, noneSelectors);
             if (theme.mode === 1) {
                 const invertedChildSelectors = [];
                 noneSelectors.forEach((parent) => {
@@ -7910,12 +8207,13 @@ function setInversionStyleValue(invertStyle) {
                         invertedChildSelectors.push(`${parent} > ${child}`)
                     );
                 });
-                appendRule(invertedChildSelectors, invertFilter);
+                appendRule(group, invertedChildSelectors, invertFilter);
             }
         }
-    }
-    if (filterSelectors.dim.size > 0) {
+    };
+    const buildDimRules = (group, filterSelectors, theme) => {
         appendRule(
+            group,
             [...filterSelectors.dim],
             getCSSFilterValue({
                 ...theme,
@@ -7923,34 +8221,50 @@ function setInversionStyleValue(invertStyle) {
                 sepia: clamp(theme.sepia + 10, 0, 100)
             })
         );
-    }
-    invertStyle.textContent = rules.join("\n");
+    };
+    const mediaKeys = new Set(["", ...mediaFilterSelectors.keys()]);
+    mediaKeys.forEach((media) => {
+        const group = buildGroupRules(media);
+        if (group.length === 0) {
+            return;
+        }
+        if (media) {
+            rules.push(`@media ${media} {\n${group.join("\n")}\n}`);
+        } else {
+            rules.push(...group);
+        }
+    });
+    return rules.join("\n");
 }
 function createStaticStyleOverrides() {
-    const fallbackStyle = createOrUpdateStyle("darkreader--fallback", document);
-    fallbackStyle.textContent = getModifiedFallbackStyle(theme, {strict: true});
-    injectStaticStyle(fallbackStyle, null, "fallback");
-    const userAgentStyle = createOrUpdateStyle("darkreader--user-agent");
-    userAgentStyle.textContent = getModifiedUserAgentStyle(
-        theme,
-        isIFrame$1,
-        theme.styleSystemControls
-    );
-    injectStaticStyle(userAgentStyle, fallbackStyle, "user-agent");
-    const textStyle = createOrUpdateStyle("darkreader--text");
-    if (theme.useFont || theme.textStroke > 0) {
-        textStyle.textContent = createTextStyle(theme);
-    } else {
-        textStyle.textContent = "";
+    if (!staticStyleInjector) {
+        staticStyleInjector = createStaticStyleInjector();
     }
-    injectStaticStyle(textStyle, userAgentStyle, "text");
-    const invertStyle = createOrUpdateStyle("darkreader--invert");
-    setInversionStyleValue(invertStyle);
-    injectStaticStyle(invertStyle, textStyle, "invert");
-    const inlineStyle = createOrUpdateStyle("darkreader--inline");
-    inlineStyle.textContent = getInlineOverrideStyle();
-    injectStaticStyle(inlineStyle, invertStyle, "inline");
-    const variableStyle = createOrUpdateStyle("darkreader--variables");
+    if (isLayerRuleSupported) {
+        const layersStyle = createOrUpdateStyle("darkreader-layers", document);
+        layersStyle.textContent = "@layer darkreader";
+        if (document.head.firstChild !== layersStyle) {
+            document.head.insertBefore(layersStyle, document.head.firstChild);
+        }
+    }
+    staticStyleInjector.begin();
+    staticStyleInjector.inject(
+        "fallback",
+        getModifiedFallbackStyle(theme, {strict: true}),
+        "beginning"
+    );
+    staticStyleInjector.inject(
+        "user-agent",
+        getModifiedUserAgentStyle(theme, isIFrame$1, theme.styleSystemControls),
+        "beginning"
+    );
+    staticStyleInjector.inject(
+        "text",
+        theme.useFont || theme.textStroke > 0 ? createTextStyle(theme) : "",
+        "beginning"
+    );
+    staticStyleInjector.inject("invert", getInversionStyleValue(), "beginning");
+    staticStyleInjector.inject("inline", getInlineOverrideStyle(), "beginning");
     const selectionColors = theme?.selectionColor
         ? getSelectionColor(theme)
         : null;
@@ -7962,7 +8276,7 @@ function createStaticStyleOverrides() {
         parseColorWithCache("#000000"),
         theme
     );
-    variableStyle.textContent = [
+    const variableStyleContent = [
         `:root {`,
         `   --darkreader-neutral-background: ${neutralBackgroundColor};`,
         `   --darkreader-neutral-text: ${neutralTextColor};`,
@@ -7970,12 +8284,14 @@ function createStaticStyleOverrides() {
         `   --darkreader-selection-text: ${selectionColors?.foregroundColorSelection ?? "initial"};`,
         `}`
     ].join("\n");
-    injectStaticStyle(variableStyle, inlineStyle, "variables", () =>
-        registerVariablesSheet(variableStyle.sheet)
+    const variableSheet = staticStyleInjector.inject(
+        "variables",
+        variableStyleContent,
+        "beginning",
+        () => registerVariablesSheet(variableSheet)
     );
-    registerVariablesSheet(variableStyle.sheet);
-    const rootVarsStyle = createOrUpdateStyle("darkreader--root-vars");
-    injectStaticStyle(rootVarsStyle, variableStyle, "root-vars");
+    registerVariablesSheet(variableSheet);
+    staticStyleInjector.inject("root-vars", "", "beginning");
     const enableStyleSheetsProxy = !(fixes && fixes.disableStyleSheetsProxy);
     const enableCustomElementRegistryProxy = !(
         fixes && fixes.disableCustomElementRegistryProxy
@@ -7986,13 +8302,18 @@ function createStaticStyleOverrides() {
         proxyScript.append(
             `(${injectProxy})(${enableStyleSheetsProxy}, ${enableCustomElementRegistryProxy})`
         );
-        document.head.insertBefore(proxyScript, rootVarsStyle.nextSibling);
+        document.head.insertBefore(
+            proxyScript,
+            document.head.querySelector(".darkreader")?.nextSibling ??
+                document.head.firstElementChild
+        );
         proxyScript.remove();
     }
-    const overrideStyle = createOrUpdateStyle("darkreader--override");
-    overrideStyle.textContent =
-        fixes && fixes.css ? replaceCSSTemplates(fixes.css) : "";
-    injectStaticStyle(overrideStyle, document.head.lastChild, "override");
+    staticStyleInjector.inject(
+        "override",
+        fixes && fixes.css ? replaceCSSTemplates(fixes.css) : "",
+        "ending"
+    );
 }
 const shadowRootsWithOverrides = new Set();
 function createShadowStaticStyleOverridesInner(root) {
@@ -8004,7 +8325,7 @@ function createShadowStaticStyleOverridesInner(root) {
         fixes && fixes.css ? replaceCSSTemplates(fixes.css) : "";
     root.insertBefore(overrideStyle, inlineStyle.nextSibling);
     const invertStyle = createOrUpdateStyle("darkreader--invert", root);
-    setInversionStyleValue(invertStyle);
+    invertStyle.textContent = getInversionStyleValue();
     root.insertBefore(invertStyle, overrideStyle.nextSibling);
     shadowRootsWithOverrides.add(root);
 }
@@ -8061,8 +8382,11 @@ function cleanFallbackStyle() {
         fallback.textContent = "";
     }
 }
+function updateRootVars() {
+    const rootVarsStyle = createOrUpdateStyle("darkreader--root-vars");
+    variablesStore.putRootVars(rootVarsStyle, theme);
+}
 function createDynamicStyleOverrides() {
-    cancelRendering();
     const allStyles = getManageableStyles(document);
     const newManagers = allStyles
         .filter((style) => !styleManagers.has(style))
@@ -8074,12 +8398,8 @@ function createDynamicStyleOverrides() {
             variablesStore.addRulesForMatching(detail.rules);
         });
     variablesStore.matchVariablesAndDependents();
-    variablesStore.setOnRootVariableChange(() => {
-        const rootVarsStyle = createOrUpdateStyle("darkreader--root-vars");
-        variablesStore.putRootVars(rootVarsStyle, theme);
-    });
-    const rootVarsStyle = createOrUpdateStyle("darkreader--root-vars");
-    variablesStore.putRootVars(rootVarsStyle, theme);
+    variablesStore.setOnRootVariableChange(() => updateRootVars());
+    updateRootVars();
     styleManagers.forEach((manager) =>
         manager.render(theme, ignoredImageAnalysisSelectors)
     );
@@ -8156,18 +8476,6 @@ function removeManager(element) {
         styleManagers.delete(element);
     }
 }
-const throttledRenderAllStyles = throttle((callback) => {
-    styleManagers.forEach((manager) =>
-        manager.render(theme, ignoredImageAnalysisSelectors)
-    );
-    adoptedStyleManagers.forEach((manager) =>
-        manager.render(theme, ignoredImageAnalysisSelectors)
-    );
-    callback && callback();
-});
-const cancelRendering = function () {
-    throttledRenderAllStyles.cancel();
-};
 function onDOMReady() {
     if (loadingStyles.size === 0) {
         cleanFallbackStyle();
@@ -8262,10 +8570,7 @@ function watchForUpdates() {
                 const styleAttr = element.getAttribute("style") || "";
                 if (styleAttr.includes("--")) {
                     variablesStore.matchVariablesAndDependents();
-                    const rootVarsStyle = createOrUpdateStyle(
-                        "darkreader--root-vars"
-                    );
-                    variablesStore.putRootVars(rootVarsStyle, theme);
+                    updateRootVars();
                 }
             }
         },
@@ -8377,25 +8682,49 @@ function disableConflictingPlugins() {
         });
     }
 }
+function createPDFOverlay(parent) {
+    const overlay = document.createElement("div");
+    overlay.classList.add("darkreader");
+    overlay.classList.add("darkreader--pdf-overlay");
+    overlay.style.backdropFilter = "invert(100%) contrast(90%)";
+    overlay.style.pointerEvents = "none";
+    overlay.style.position = "fixed";
+    overlay.style.left = "0px";
+    overlay.style.right = "0px";
+    overlay.style.bottom = "0px";
+    overlay.style.top = "56px";
+    parent.append(overlay);
+    cleaners.push(() => {
+        overlay.remove();
+    });
+}
 function tryInvertChromePDF() {
     if (!document.body || !chrome.dom) {
         return;
     }
     const root = chrome.dom.openOrClosedShadowRoot(document.body);
-    if (!root || !root.querySelector('link[href$="/pdf_embedder.css"]')) {
+    if (
+        !root ||
+        (!root.querySelector('link[href$="/pdf_embedder.css"]') &&
+            !root.querySelector('iframe[type="application/pdf"]'))
+    ) {
         return;
     }
-    const sheet = new CSSStyleSheet();
-    sheet.replaceSync(
-        '[type="application/pdf"] { filter: invert(1) contrast(0.9); }'
-    );
-    root.adoptedStyleSheets.push(sheet);
-    cleaners.push(() => {
-        const index = root.adoptedStyleSheets.indexOf(sheet);
-        if (index >= 0) {
-            root.adoptedStyleSheets.splice(index, 1);
-        }
-    });
+    if (isChromium && !isMobile) {
+        createPDFOverlay(root);
+    } else {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(
+            '[type="application/pdf"] { filter: invert(1) contrast(0.9); }'
+        );
+        root.adoptedStyleSheets.push(sheet);
+        cleaners.push(() => {
+            const index = root.adoptedStyleSheets.indexOf(sheet);
+            if (index >= 0) {
+                root.adoptedStyleSheets.splice(index, 1);
+            }
+        });
+    }
 }
 let prevTheme = null;
 let prevFixes = null;
@@ -8644,13 +8973,13 @@ function cleanDynamicThemeCache() {
     parsedURLCache.clear();
     cleanFilterSelectors();
     removeDocumentVisibilityListener();
-    cancelRendering();
     stopWatchingForUpdates();
     cleanModificationCache();
     clearColorCache();
     releaseVariablesSheet();
     prevTheme = null;
     prevFixes = null;
+    staticStyleInjector = null;
 }
 
 function parseCSS(cssText) {

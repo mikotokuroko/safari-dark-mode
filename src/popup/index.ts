@@ -3,10 +3,11 @@ import {DEFAULT_SETTINGS, validateSettings, withSiteMode} from '../shared/settin
 import {queryTabs, sendRuntimeMessage} from '../shared/webextension';
 
 const STATUS_LABELS: Readonly<Record<PageStatus, string>> = {
-  darkened: 'Darkened',
+  darkened: 'Darkened (System dark)',
   'native-dark': 'Native dark theme detected — left untouched',
-  disabled: 'Disabled',
-  forced: 'Darkened by Force dark',
+  'system-light': 'System light mode — left untouched',
+  disabled: 'Light mode / Disabled',
+  forced: 'Darkened (Forced dark)',
   unsupported: 'This page is unsupported',
   'access-unavailable': 'Website access is unavailable',
 };
@@ -26,6 +27,7 @@ const resetButton = element<HTMLButtonElement>('reset');
 const sliders = ['brightness', 'contrast', 'sepia'] as const;
 let settings = DEFAULT_SETTINGS;
 let hostname = '';
+let activeTabId: number | undefined;
 
 function render(): void {
   enabledInput.checked = settings.enabled;
@@ -35,16 +37,29 @@ function render(): void {
     input.value = String(settings[name]);
     output.value = String(settings[name]);
   }
-  const mode = settings.siteModes[hostname] ?? 'force';
+  const siteFieldset = document.querySelector<HTMLFieldSetElement>('fieldset');
+  if (siteFieldset !== null) {
+    siteFieldset.disabled = hostname === '';
+  }
+  const mode = settings.siteModes[hostname] ?? 'auto';
   const radio = document.querySelector<HTMLInputElement>(`input[name="site-mode"][value="${mode}"]`);
   if (radio !== null) {
     radio.checked = true;
   }
 }
 
+async function refreshPageStatus(): Promise<void> {
+  if (hostname === '' || activeTabId === undefined) {
+    return;
+  }
+  const state = await sendRuntimeMessage<PageState | undefined>({type: 'get-page-state', tabId: activeTabId});
+  statusText.textContent = state === undefined ? STATUS_LABELS['access-unavailable'] : STATUS_LABELS[state.status];
+}
+
 async function save(next: SettingsV1): Promise<void> {
   settings = validateSettings(await sendRuntimeMessage({type: 'replace-settings', settings: next}));
   render();
+  await refreshPageStatus();
 }
 
 async function initialize(): Promise<void> {
@@ -53,11 +68,9 @@ async function initialize(): Promise<void> {
   const tab = tabs[0];
   if (tab?.url !== undefined && /^https?:/.test(tab.url)) {
     hostname = new URL(tab.url).hostname.toLowerCase();
+    activeTabId = tab.id;
     hostnameText.textContent = hostname;
-    if (tab.id !== undefined) {
-      const state = await sendRuntimeMessage<PageState | undefined>({type: 'get-page-state', tabId: tab.id});
-      statusText.textContent = state === undefined ? STATUS_LABELS['access-unavailable'] : STATUS_LABELS[state.status];
-    }
+    await refreshPageStatus();
   } else {
     statusText.textContent = STATUS_LABELS.unsupported;
   }

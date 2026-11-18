@@ -12,6 +12,7 @@ export interface SettingsV1 {
 export type PageStatus =
   | 'darkened'
   | 'native-dark'
+  | 'system-light'
   | 'disabled'
   | 'forced'
   | 'unsupported'

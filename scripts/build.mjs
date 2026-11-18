@@ -1,6 +1,7 @@
 import {cp, mkdir, readFile, rm, writeFile} from 'node:fs/promises';
 import {deflateSync} from 'node:zlib';
 import {build} from 'esbuild';
+import {compileConfigText} from './config-compiler.mjs';
 
 const root = new URL('../', import.meta.url);
 const output = new URL('dist/extension/', root);
@@ -70,7 +71,20 @@ await build({
   outdir: output.pathname,
   minify: true,
   legalComments: 'none',
-  loader: {'.config': 'text'},
+  plugins: [
+    {
+      name: 'compile-darkreader-configs',
+      setup(buildContext) {
+        buildContext.onLoad({filter: /\.config$/}, async (args) => {
+          const text = await readFile(args.path, 'utf8');
+          return {
+            contents: JSON.stringify(compileConfigText(text)),
+            loader: 'json',
+          };
+        });
+      },
+    },
+  ],
 });
 
 for (const [source, destination] of [

@@ -17,15 +17,15 @@ describe('settings validation', () => {
     });
   });
 
-  it('normalizes exact hostnames and preserves automatic exceptions', () => {
+  it('normalizes exact hostnames and omits default auto entries', () => {
     expect(normalizeHostname(' ExAmPle.COM. ')).toBe('example.com');
     expect(normalizeHostname('example.com/path')).toBe('');
-    const settings = validateSettings({siteModes: {'EXAMPLE.com.': 'off', 'bad/path': 'force', 'auto.test': 'auto'}});
-    expect(settings.siteModes).toEqual({'example.com': 'off', 'auto.test': 'auto'});
-    expect(withSiteMode(settings, 'Sub.Example.com', 'force').siteModes).toEqual({
+    const settings = validateSettings({siteModes: {'EXAMPLE.com.': 'off', 'bad/path': 'force', 'auto.test': 'auto', 'force.test': 'force'}});
+    expect(settings.siteModes).toEqual({'example.com': 'off', 'force.test': 'force'});
+    expect(withSiteMode(settings, 'Sub.Example.com', 'auto').siteModes).toEqual({
       'example.com': 'off',
-      'auto.test': 'auto',
+      'force.test': 'force',
     });
-    expect(withSiteMode(settings, 'example.com', 'force').siteModes).toEqual({'auto.test': 'auto'});
+    expect(withSiteMode(settings, 'example.com', 'auto').siteModes).toEqual({'force.test': 'force'});
   });
 });

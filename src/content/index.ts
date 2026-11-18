@@ -1,11 +1,11 @@
 import type {PageState, SettingsChangedMessage, SettingsV1} from '../shared/contracts';
 import {createDebouncedTask} from '../shared/debounce';
 import {decidePolicy} from '../shared/policy';
-import {validateSettings} from '../shared/settings';
+import {SETTINGS_STORAGE_KEY, validateSettings} from '../shared/settings';
 import {detectNativeDark, observeThemeChanges} from './detector';
 import {disableEngine, enableEngine} from './engine';
 import {getDetectorHint} from './upstream-config';
-import {sendRuntimeMessage} from '../shared/webextension';
+import {sendRuntimeMessage, storageGet} from '../shared/webextension';
 
 const PRELOAD_ID = 'safari-dark-mode-preload';
 let settings: SettingsV1;
@@ -32,35 +32,58 @@ function report(state: PageState): void {
   }
 }
 
-function reevaluate(): void {
+function getDarkColorSchemeQuery(): MediaQueryList | undefined {
+  return typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : undefined;
+}
+
+function isSystemDark(): boolean {
+  return getDarkColorSchemeQuery()?.matches ?? true;
+}
+
+function syncThemeObserver(shouldObserve: boolean): void {
+  if (shouldObserve) {
+    themeObserver ??= observeThemeChanges(document, debouncedReevaluation.schedule);
+  } else if (themeObserver !== undefined) {
+    themeObserver.disconnect();
+    themeObserver = undefined;
+  }
+}
+
+function reevaluate(): PageState {
   const hostname = location.hostname.toLowerCase();
   if (!/^https?:$/.test(location.protocol)) {
+    syncThemeObserver(false);
     disableEngine();
     removePreload();
-    report({hostname, status: 'unsupported'});
-    return;
+    const state: PageState = {hostname, status: 'unsupported'};
+    report(state);
+    return state;
   }
-  const nativeDark = settings.enabled && settings.siteModes[hostname] === 'auto'
+  const mode = settings.siteModes[hostname] ?? 'auto';
+  const systemDark = isSystemDark();
+  const shouldDetectNative = settings.enabled && mode === 'auto' && systemDark;
+  syncThemeObserver(shouldDetectNative);
+  const nativeDark = shouldDetectNative
     && document.querySelector('body') !== null && detectNativeDark(document, getDetectorHint(location.href));
-  const decision = decidePolicy(settings, hostname, nativeDark);
+  const decision = decidePolicy(settings, hostname, nativeDark, systemDark);
   if (decision.apply) {
     enableEngine(settings, location.href);
   } else {
     disableEngine();
   }
   removePreload();
-  report({hostname, status: decision.status});
+  const state: PageState = {hostname, status: decision.status};
+  report(state);
+  return state;
 }
 
 const debouncedReevaluation = createDebouncedTask(reevaluate, 180);
 
 function watchChanges(): void {
-  themeObserver?.disconnect();
-  themeObserver = observeThemeChanges(document, debouncedReevaluation.schedule);
   for (const method of ['pushState', 'replaceState'] as const) {
-    const original = history[method];
+    const original: (...args: Parameters<History[typeof method]>) => void = history[method].bind(history);
     history[method] = function (...args: Parameters<History[typeof method]>): void {
-      original.apply(history, args);
+      original(...args);
       debouncedReevaluation.schedule();
     } as History[typeof method];
   }
@@ -68,11 +91,23 @@ function watchChanges(): void {
   document.addEventListener('DOMContentLoaded', debouncedReevaluation.schedule, {once: true});
   addEventListener('popstate', debouncedReevaluation.schedule);
   addEventListener('hashchange', debouncedReevaluation.schedule);
+  getDarkColorSchemeQuery()?.addEventListener('change', debouncedReevaluation.schedule);
+}
+
+async function loadInitialSettings(): Promise<SettingsV1> {
+  const storage = chrome.storage as typeof chrome.storage | undefined;
+  if (storage?.local !== undefined) {
+    const stored = await storageGet(SETTINGS_STORAGE_KEY);
+    if (SETTINGS_STORAGE_KEY in stored) {
+      return validateSettings(stored[SETTINGS_STORAGE_KEY]);
+    }
+  }
+  return validateSettings(await sendRuntimeMessage({type: 'get-settings'}));
 }
 
 async function initialize(): Promise<void> {
   try {
-    settings = validateSettings(await sendRuntimeMessage({type: 'get-settings'}));
+    settings = await loadInitialSettings();
     reevaluate();
     watchChanges();
   } catch {
@@ -81,13 +116,26 @@ async function initialize(): Promise<void> {
   }
 }
 
-installPreload();
+if (isSystemDark()) {
+  installPreload();
+}
 void initialize();
 
-chrome.runtime.onMessage.addListener((message: unknown): void => {
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse): boolean => {
   const candidate = message as Partial<SettingsChangedMessage>;
   if (candidate.type === 'settings-changed') {
     settings = validateSettings(candidate.settings);
-    debouncedReevaluation.schedule();
+    const state = reevaluate();
+    sendResponse(state);
+    return false;
+  }
+  return false;
+});
+
+(chrome.storage as typeof chrome.storage | undefined)?.onChanged.addListener((changes, areaName): void => {
+  const entry = changes[SETTINGS_STORAGE_KEY];
+  if (areaName === 'local' && entry?.newValue !== undefined) {
+    settings = validateSettings(entry.newValue);
+    reevaluate();
   }
 });
