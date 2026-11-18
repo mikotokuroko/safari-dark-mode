@@ -149,7 +149,11 @@ export function observeThemeChanges(documentValue: Document, callback: () => voi
     const element = node instanceof Element ? node : node.parentElement;
     return (element?.closest('[data-safari-dark-mode], .darkreader, [class^="darkreader--"]') ?? null) !== null;
   };
+  let observedBody: HTMLElement | null = null;
+  let observedHead: HTMLHeadElement | null = null;
+
   const observer = new MutationObserver((mutations) => {
+    attachSecondaryTargets();
     const relevant = mutations.some((mutation) => {
       if (isExtensionOwned(mutation.target)) {
         return false;
@@ -163,11 +167,33 @@ export function observeThemeChanges(documentValue: Document, callback: () => voi
       callback();
     }
   });
+
+  const attachSecondaryTargets = (): void => {
+    const body = documentValue.body as HTMLElement | null;
+    if (body !== null && body !== observedBody) {
+      observedBody = body;
+      observer.observe(observedBody, {
+        attributes: true,
+        attributeFilter: ['class', 'style', ...THEME_ATTRIBUTES],
+      });
+    }
+    const head = documentValue.head as HTMLHeadElement | null;
+    if (head !== null && head !== observedHead) {
+      observedHead = head;
+      observer.observe(observedHead, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['content'],
+      });
+    }
+  };
+
   observer.observe(documentValue.documentElement, {
-    subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ['class', 'style', ...THEME_ATTRIBUTES, 'content'],
+    attributeFilter: ['class', 'style', ...THEME_ATTRIBUTES],
   });
+  attachSecondaryTargets();
   return observer;
 }

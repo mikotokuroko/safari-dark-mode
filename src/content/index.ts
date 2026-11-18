@@ -40,9 +40,19 @@ function isSystemDark(): boolean {
   return getDarkColorSchemeQuery()?.matches ?? true;
 }
 
+function syncThemeObserver(shouldObserve: boolean): void {
+  if (shouldObserve) {
+    themeObserver ??= observeThemeChanges(document, debouncedReevaluation.schedule);
+  } else if (themeObserver !== undefined) {
+    themeObserver.disconnect();
+    themeObserver = undefined;
+  }
+}
+
 function reevaluate(): PageState {
   const hostname = location.hostname.toLowerCase();
   if (!/^https?:$/.test(location.protocol)) {
+    syncThemeObserver(false);
     disableEngine();
     removePreload();
     const state: PageState = {hostname, status: 'unsupported'};
@@ -51,7 +61,9 @@ function reevaluate(): PageState {
   }
   const mode = settings.siteModes[hostname] ?? 'auto';
   const systemDark = isSystemDark();
-  const nativeDark = settings.enabled && mode === 'auto' && systemDark
+  const shouldDetectNative = settings.enabled && mode === 'auto' && systemDark;
+  syncThemeObserver(shouldDetectNative);
+  const nativeDark = shouldDetectNative
     && document.querySelector('body') !== null && detectNativeDark(document, getDetectorHint(location.href));
   const decision = decidePolicy(settings, hostname, nativeDark, systemDark);
   if (decision.apply) {
@@ -68,8 +80,6 @@ function reevaluate(): PageState {
 const debouncedReevaluation = createDebouncedTask(reevaluate, 180);
 
 function watchChanges(): void {
-  themeObserver?.disconnect();
-  themeObserver = observeThemeChanges(document, debouncedReevaluation.schedule);
   for (const method of ['pushState', 'replaceState'] as const) {
     const original: (...args: Parameters<History[typeof method]>) => void = history[method].bind(history);
     history[method] = function (...args: Parameters<History[typeof method]>): void {
