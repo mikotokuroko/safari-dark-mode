@@ -1,5 +1,14 @@
 declare module '*.config' {
-  const contents: string;
+  interface ConfigBlock {
+    readonly patterns: readonly string[];
+    readonly commands: Readonly<Record<string, string>>;
+  }
+  interface CompiledConfig {
+    readonly exact: Readonly<Record<string, readonly ConfigBlock[]>>;
+    readonly wildcards: readonly {readonly suffix: string; readonly block: ConfigBlock}[];
+    readonly global: readonly ConfigBlock[];
+  }
+  const contents: string | CompiledConfig;
   export default contents;
 }
 

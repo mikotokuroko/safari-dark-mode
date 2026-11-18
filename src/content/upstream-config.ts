@@ -1,10 +1,21 @@
-import detectorHintsText from '../vendor/darkreader/detector-hints.config';
-import dynamicFixesText from '../vendor/darkreader/dynamic-theme-fixes.config';
+import detectorHintsSource from '../vendor/darkreader/detector-hints.config';
+import dynamicFixesSource from '../vendor/darkreader/dynamic-theme-fixes.config';
 import type {DetectorHint} from './detector';
 
 interface ConfigBlock {
   readonly patterns: readonly string[];
   readonly commands: Readonly<Record<string, string>>;
+}
+
+interface WildcardEntry {
+  readonly suffix: string;
+  readonly block: ConfigBlock;
+}
+
+interface CompiledConfig {
+  readonly exact: Readonly<Record<string, readonly ConfigBlock[]>>;
+  readonly wildcards: readonly WildcardEntry[];
+  readonly global: readonly ConfigBlock[];
 }
 
 export interface DynamicThemeFix {
@@ -16,29 +27,33 @@ export interface DynamicThemeFix {
   readonly ignoreCSSUrl: string[];
 }
 
-function parseBlocks(text: string): readonly ConfigBlock[] {
-  return text.replace(/\r\n/g, '\n').split(/\n={16,}\n/g).map((section) => {
-    const lines = section.trim().split('\n');
+function compileRawConfig(text: string): CompiledConfig {
+  const exact: Record<string, ConfigBlock[]> = Object.create(null) as Record<string, ConfigBlock[]>;
+  const wildcards: WildcardEntry[] = [];
+  const global: ConfigBlock[] = [];
+
+  for (const section of text.replace(/\r\n/g, '\n').split(/\n={16,}\n/g)) {
+    const sectionLines = section.trim().split('\n');
     const patterns: string[] = [];
     let index = 0;
-    while (index < lines.length && (lines[index]?.trim() ?? '') !== '') {
-      patterns.push(lines[index]?.trim() ?? '');
+    while (index < sectionLines.length && (sectionLines[index]?.trim() ?? '') !== '') {
+      patterns.push(sectionLines[index]?.trim() ?? '');
       index += 1;
     }
     const commands: Record<string, string> = {};
-    while (index < lines.length) {
-      while (index < lines.length && (lines[index]?.trim() ?? '') === '') {
+    while (index < sectionLines.length) {
+      while (index < sectionLines.length && (sectionLines[index]?.trim() ?? '') === '') {
         index += 1;
       }
-      const command = lines[index]?.trim();
+      const command = sectionLines[index]?.trim();
       if (command === undefined) {
         break;
       }
       index += 1;
       const values: string[] = [];
-      while (index < lines.length) {
-        const line = lines[index] ?? '';
-        if (line.trim() === '' && /^[A-Z][A-Z ]+$/.test((lines[index + 1] ?? '').trim())) {
+      while (index < sectionLines.length) {
+        const line = sectionLines[index] ?? '';
+        if (line.trim() === '' && /^[A-Z][A-Z ]+$/.test((sectionLines[index + 1] ?? '').trim())) {
           break;
         }
         values.push(line);
@@ -46,28 +61,43 @@ function parseBlocks(text: string): readonly ConfigBlock[] {
       }
       commands[command] = values.join('\n').trim();
     }
-    return {patterns, commands};
-  });
+    if (patterns.length === 0) {
+      continue;
+    }
+    const block: ConfigBlock = {patterns, commands};
+    for (const rawPattern of patterns) {
+      const clean = rawPattern.replace(/^\^/, '').replace(/\/$/, '').toLowerCase();
+      if (clean === '*') {
+        global.push(block);
+      } else if (clean.startsWith('*.')) {
+        wildcards.push({suffix: clean.slice(2), block});
+      } else if (clean !== '') {
+        (exact[clean] ??= []).push(block);
+      }
+    }
+  }
+  return {exact, wildcards, global};
 }
 
-function patternMatches(hostname: string, pattern: string): boolean {
-  const clean = pattern.replace(/^\^/, '').replace(/\/$/, '').toLowerCase();
-  if (clean === '*') {
-    return true;
-  }
-  if (clean.startsWith('*.')) {
-    const suffix = clean.slice(2);
-    return hostname === suffix || hostname.endsWith(`.${suffix}`);
-  }
-  return hostname === clean;
+function createLazyConfig(source: string | CompiledConfig): () => CompiledConfig {
+  let compiled: CompiledConfig | undefined = typeof source === 'string' ? undefined : source;
+  return () => (compiled ??= compileRawConfig(source as string));
 }
 
-const parsedDetectorHints = parseBlocks(detectorHintsText);
-const parsedDynamicFixes = parseBlocks(dynamicFixesText);
+const getDetectorHintsConfig = createLazyConfig(detectorHintsSource);
+const getDynamicFixesConfig = createLazyConfig(dynamicFixesSource);
 
-function relevantBlocks(blocks: readonly ConfigBlock[], url: string): readonly ConfigBlock[] {
-  const hostname = new URL(url).hostname.toLowerCase();
-  return blocks.filter((block) => block.patterns.some((pattern) => patternMatches(hostname, pattern)));
+function matchingHostBlocks(config: CompiledConfig, hostname: string, includeGlobal: boolean): readonly ConfigBlock[] {
+  const matches = new Set<ConfigBlock>(includeGlobal ? config.global : undefined);
+  for (const block of config.exact[hostname] ?? []) {
+    matches.add(block);
+  }
+  for (const entry of config.wildcards) {
+    if (hostname === entry.suffix || hostname.endsWith(`.${entry.suffix}`)) {
+      matches.add(entry.block);
+    }
+  }
+  return [...matches];
 }
 
 function lines(value: string | undefined): string[] {
@@ -75,7 +105,9 @@ function lines(value: string | undefined): string[] {
 }
 
 export function getDetectorHint(url: string): DetectorHint | undefined {
-  const block = relevantBlocks(parsedDetectorHints, url).find((candidate) => !candidate.patterns.includes('*'));
+  const hostname = new URL(url).hostname.toLowerCase();
+  const block = matchingHostBlocks(getDetectorHintsConfig(), hostname, false)
+    .find((candidate) => !candidate.patterns.includes('*'));
   if (block === undefined) {
     return undefined;
   }
@@ -88,7 +120,8 @@ export function getDetectorHint(url: string): DetectorHint | undefined {
 }
 
 export function getDynamicThemeFix(url: string): DynamicThemeFix {
-  const blocks = relevantBlocks(parsedDynamicFixes, url);
+  const hostname = new URL(url).hostname.toLowerCase();
+  const blocks = matchingHostBlocks(getDynamicFixesConfig(), hostname, true);
   return {
     invert: blocks.flatMap((block) => lines(block.commands.INVERT)),
     css: blocks.map((block) => block.commands.CSS ?? '').filter(Boolean).join('\n'),
